@@ -17,10 +17,10 @@ let intervalId = 0
 const registeredTools = []
 const registeredRoutes = []
 const ctx = {
+  webServer: {
+    register: (route) => { registeredRoutes.push(route); return () => {} },
+  },
   get: (name) => {
-    if (name === 'webServer') return {
-      register: (route) => { registeredRoutes.push(route); return () => {} },
-    }
     if (name === 'tools') return { register: (def) => { registeredTools.push(def); return () => {} } }
     return undefined
   },
