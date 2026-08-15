@@ -1,13 +1,14 @@
 # dsh-graceful-restart bundle patch —— 挂载 host 半（client 半经 dsh.client 清单被 client-modules 扫描发现）。
 # webserver 端口按代际条件化（"自动套壳"）：
-#   第一代（用户直接 dsh web，无 DSH_LAUNCHER_WRAPPER）：port 0 = OS 随机端口，不占 3080
+#   第一代（用户直接 dsh web，无 DSH_LAUNCHER_WRAPPER）：固定用正式端口+1（3081）
+#     —— 机制上确定不撞正式端口（不再依赖 port 0 随机避开）
 #     —— 本插件的 wrapper 逻辑随即 spawn 第二代（继承控制台）并常驻为隐形 launcher
-#   第二代+（wrapper 拉起，DSH_LAUNCHER_WRAPPER=1）：正常监听 3080
+#   第二代+（wrapper 拉起，DSH_LAUNCHER_WRAPPER=1）：正常监听正式端口 3080
 - id: webserver
   name: '@deepseek-ai/dsh-host-webserver'
   config:
     host: '127.0.0.1'
-    port: !!js "(process.env.DSH_LAUNCHER_WRAPPER === '1') ? 3080 : 0"
+    port: !!js "(process.env.DSH_LAUNCHER_WRAPPER === '1') ? 3080 : 3081"
 
 - insert:
     - id: dsh-graceful-restart
