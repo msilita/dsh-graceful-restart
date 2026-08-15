@@ -1,0 +1,18 @@
+# dependencies
+node_modules/
+
+# build output
+dist/
+lib/*.js.map
+
+# logs & runtime artifacts
+*.log
+
+# editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# pnpm
+.pnpm-store/
