@@ -1,49 +1,66 @@
 # dsh-graceful-restart
 
-DSH 优雅重启/关闭插件：**等当前轮次结束后退出**；重启由一次性执行器拉起新进程（**输出回到原终端**），工具触发时自动唤醒智能体继续工作。
+DSH 优雅重启/关闭插件。**用户启动方式完全不变**（`dsh web`），插件自动"套壳"：
+第一代进程阻止自身启动（webServer 随机端口，不占 3080）并拉起正式实例（继承控制台），
+随后常驻为隐形 launcher——重启时在原控制台拉起新一代，并自动唤醒智能体继续工作。
 
-**无常驻看门狗、无 IPC、零文件标志**——执行器是一次性进程，任务完成即结束。
+**无常驻看门狗**（第一代只响应显式请求）、**无外部工具**（不需要手动启动 launcher）。
 
-## 架构（v3.5）
+## 架构（v5，自动套壳）
 
 ```
-触发（restart_harness 工具=重启+唤醒 | shutdown_harness 工具=关闭 | /restart | /shutdown）
-  → 插件内存 pendingAction，监听 agent/status，所有 agent idle（turn/end 已落盘）后：
-      - 重启+唤醒：写 dsh-resume.json（活跃会话 id 列表）
-      - restart：spawn 一次性执行器（detached + stdio ['ignore',1,2]）
-      - shutdown：不 spawn，直接 process.exit(0)
-  → 执行器（detached，无控制台，父退出后存活）等旧 DSH 死（60s 上限）
-  → 拉起新 DSH：同 argv/cwd，stdio ['ignore',1,2] + windowsHide
-      - fd 1/2 = 旧 DSH 的 stdout/stderr（Windows Terminal ConPTY 管道 / conhost 句柄）
-        → 新 DSH 输出回到用户启动 dsh 的终端
-      - windowsHide（CREATE_NO_WINDOW）：父无控制台时系统不会为新 DSH 创建新 conhost 窗口
-  → 执行器阻塞到新 DSH 退出（父退出会连带杀死共享控制台的子进程）
-  → 新 DSH 插件 apply：读 env DSH_GRACEFUL_RESTART_WAKE → WAKE=1 时读 dsh-resume.json，
-      轮询等待会话从持久化恢复（客户端重连触发 resume），然后 steer 唤醒 → 清 marker
-  → Client 半检测连接恢复 → 自动 location.reload() 一次 → POST /ack（兼容保留）
+用户终端（ConPTY 管道）
+  └── dsh web（第一代，用户启动）
+        ├── 插件 apply（无 DSH_LAUNCHER_WRAPPER）→ wrapper 模式：
+        │     · 阻止启动：bundle patch 把 webserver 端口条件化为 0（OS 随机，不占 3080）
+        │     · spawn 第二代（非 detached + inherit → 继承控制台 + IPC 通道）
+        │     · 常驻：监听第二代的 IPC（restart/shutdown）
+        └── 第二代（DSH_LAUNCHER_WRAPPER=1）→ 正常模式：
+              · 监听 3080，输出回到用户终端（继承第一代的控制台）
+              · 插件注册 restart_harness / shutdown_harness / /restart / /shutdown
+重启（第二代触发，等轮次结束）：
+  → 写 resume marker → IPC 通知第一代 {type:'restart', wake}
+  → 第一代杀第二代 → 拉起第三代（同控制台 + env DSH_GRACEFUL_RESTART_WAKE=1）
+  → 第三代正常服务 + 读 marker → 轮询等会话恢复 → steer 唤醒
+关闭（shutdown）：IPC 通知第一代 → 第一代杀子进程 → 第一代退出（整个树结束）
 ```
 
 ## 触发语义
 
 | 触发方式 | 行为 | 唤醒 |
 |---|---|---|
-| 模型工具 `restart_harness` | 重启 | ✅ 重启后自动 `steer()` 继续 |
+| 模型工具 `restart_harness` | 重启 | ✅ 自动 `steer()` 继续 |
 | 斜杠命令 `/restart` | 重启 | ❌ 等人 |
 | 模型工具 `shutdown_harness` | 关闭（不重启） | — |
 | 斜杠命令 `/shutdown` | 关闭（不重启） | — |
 
+## 控制台输出（区分代际）
+
+```
+[dsh-graceful-restart] 第一代 wrapper：正在启动正式 dsh（几秒内完成）...
+[dsh-graceful-restart] 正式 dsh 已启动 pid=xxxx（下方输出来自正式实例）
+dsh web: http://127.0.0.1:3080          ← 正式实例（继承控制台）
+[dsh-graceful-restart] 正式 dsh 实例开始服务
+── 重启时 ──
+[dsh-graceful-restart] 收到重启请求，正在拉起新一代 dsh...
+dsh web: http://127.0.0.1:3080          ← 新一代（仍在本终端）
+```
+
 ## 关键设计
 
-- **无看门狗**：执行器是一次性进程，等旧死 → 拉起 → 新 DSH 退出后随之退出。崩溃不自动恢复（DSH 原生会话恢复会修复历史并提示 `TOOL_OUTCOME_UNKNOWN`）
-- **零 IPC**：代际信息走环境变量（`DSH_GRACEFUL_RESTART_WAKE`），会话恢复信息走 `dsh-resume.json` marker
-- **输出回原终端**：执行器继承 DSH 的 stdout/stderr fd（Windows Terminal 的 ConPTY 管道），新 DSH 再继承执行器的同一 fd——整条句柄继承链让新进程日志出现在用户启动 dsh 的窗口（`AttachConsole` 在 ConPTY 下不可渲染，故不用）
-- **windowsHide**：`CREATE_NO_WINDOW` 阻止系统为无控制台父进程的子进程创建新 conhost 窗口
-- **唤醒时序**：会话恢复发生在客户端重连之后（apply 时 agents 为空），所以先写 marker、再轮询等待目标会话出现后 steer（此前"apply 时立即 steer"的版本永不生效）
-- **自动刷新**：Client 半轮询 `/plugins/dsh-graceful-restart/status`，检测"断开 → 恢复"后 `location.reload()` 一次，`sessionStorage` 标记防循环
-
-## 优雅重启/关闭（核心保证）
-
-触发返回后**当前轮次正常收尾**：tool/result 提交、assistant 总结写入、`turn/end` 落盘（`agent/status → idle` 确认）→ 才 `process.exit(0)`。**永远不会在轮次中途杀进程**，会话历史始终完整。
+- **"一切皆插件"的边界**：跨进程拓扑（父子、控制台归属）发生在插件运行之前，无法由插件接管；
+  wrapper 通过在"第一个进程"里扮演启动代理实现同等效果，用户启动方式不变
+- **Windows Terminal（ConPTY）限制**（实测三重确认）：AttachConsole 外部附加不可渲染、
+  数字 fd 继承失效、detached 断链——唯一可靠的"输出回原终端"是**句柄继承链**
+  （第一代继承用户终端 → 第二代继承第一代 → 第三代继承第一代）
+- **父退杀子**：非 detached 子进程在父退出时被连带终止（实测）——第一代因此**常驻不退出**
+- **唤醒时序**：会话恢复发生在客户端重连之后，apply 时 agents 为空——
+  重启前写 marker（活跃会话 id），重启后轮询等待恢复再 steer
+- **可配置**（settings.yaml，热重载）：
+  ```yaml
+  dsh-graceful-restart:
+    continuePrompt: '（自定义的继续提示）'
+  ```
 
 ## 安装
 
@@ -55,7 +72,8 @@ dsh plugin --profile web add "file:D:/Project/dsh-graceful-restart"
 
 ## 文件清单（$DSH_HOME 下）
 
-- `dsh-process.json` — pid/命令行索引（插件上报，执行器读取以重建启动参数）
-- `dsh-graceful-restart-executor.cjs` — 一次性重启执行器（运行时生成）
+- `dsh-process.json` — pid/命令行索引
+- `dsh-graceful-restart-executor.cjs` — 备用外部执行器（wrapper 不可用时的兜底）
 - `dsh-resume.json` — 唤醒 marker（重启前写，唤醒完成后删除）
-- `dsh-graceful-restart.log` — 插件 + 执行器日志
+- `dsh-graceful-restart.log` — 插件 + wrapper 日志
+- `dsh-graceful-restart-launcher.log` — 外部 launcher（备用）日志
