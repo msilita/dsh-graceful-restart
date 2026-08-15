@@ -1,7 +1,7 @@
 {
   "name": "dsh-graceful-restart",
-  "version": "0.1.0",
-  "description": "DSH 优雅重启插件：等当前轮次结束后退出，由一次性重启执行器拉起新进程；工具触发自动唤醒智能体继续工作。零 @deepseek-ai 运行时依赖，避免模块双实例。",
+  "version": "0.2.0",
+  "description": "DSH（DeepSeek Harness）优雅重启/关闭/启动守护插件：启动方式不变（dsh web），自动套壳拉起正式实例；等轮次结束后优雅重启并唤醒智能体继续；启动失败自动回滚新增插件（多版本成功基线、官方 CLI）；页面自动刷新；设置菜单可调快照版本数。",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
@@ -9,6 +9,12 @@
     "./client": "./lib/client.js",
     "./package.json": "./package.json"
   },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
   "dsh": {
     "client": {
       "platform": "web"
