@@ -13,3 +13,14 @@
     - id: dsh-graceful-restart
       name: dsh-graceful-restart
       config: {}
+
+# 业务插件按代际条件禁用（与 webserver 端口同一 !!js 机制）：
+#   第一代（用户直接 dsh web，无 DSH_LAUNCHER_WRAPPER）→ disabled=true → 根本不加载
+#     （第一代零业务插件：无双 bot 连接/双定时器，无需运行时拆树，无 boot 校验冲突）
+#   第二代+（wrapper 拉起，DSH_LAUNCHER_WRAPPER=1）→ disabled=false → 正常加载
+- id: dsh-qq-client
+  disabled: !!js "process.env.DSH_LAUNCHER_WRAPPER !== '1'"
+- id: dsh-waker-trigger
+  disabled: !!js "process.env.DSH_LAUNCHER_WRAPPER !== '1'"
+- id: dsh-better-sidebar
+  disabled: !!js "process.env.DSH_LAUNCHER_WRAPPER !== '1'"
