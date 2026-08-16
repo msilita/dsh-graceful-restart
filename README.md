@@ -27,16 +27,20 @@ restart_harness 的 continuePrompt 参数（智能体触发时指定）> setting
 - `shutdown_harness` / `/shutdown`：等轮次结束后关闭整个进程树（第一代一并退出），不重启
 - `cancel_harness_action`：**撤销**已安排但尚未执行的重启 / 关闭（触发后发现不需要了，随时改变主意）
 
-### 4. 启动守护：失败自动回滚（核心）
+### 4. 启动守护：失败自动回滚（核心，v0.3.0 纯指针模型）
 
-每次 spawn 前记录**插件清单快照**（profile `package.json` 的 dependencies）；第二代启动失败（退出码非 0，或宽限期 20 秒内退出）时：
+每次 spawn 前记录**插件清单快照**（profile `package.json` 的 dependencies），按时间排序成链；**唯一指针 `current`**（时间戳键值）指向当前生效的快照：
 
-1. 对比当前清单与**最近一次成功基线** → 找出"该基线之后新增"的插件
-2. 逐个 `dsh plugin remove`（官方 CLI，同步清理 bundles）→ **自动重试**
-3. 仍失败 → 逐级回溯**更早的成功基线**（多版本 history），再卸掉下一批增量
-4. 连续回滚达上限后保持第一代存活，明确提示手动处理
-
-成功基线保留**多个版本**（设置菜单可调 `snapshotKeep`，1–10，默认 3）：第 N 次回滚使用第 N 个旧基线。启动成功（存活超宽限期）后新基线入列，与最新相同则不重复记录。
+- **启动扫描**：实际清单 vs `current` 指向快照求差集
+  - 差集为空 → 不变化（`current` 不动）
+  - 差集非空 → 先**删除比 current 新的条目**（回滚遗留的失败尝试），再**新建快照**，`current` 指向新快照（向前移动=修改快照链）
+- **正常启动**（存活超 20s 宽限期）→ 不再操作快照，只清空 stderr log、追加日志
+- **启动失败**（退出码非 0 / 宽限期内退出）：
+  1. 错误**独立记录**（`errors` 数组，只保留最新一条，不记在快照条目里；历史错误在 `dsh-graceful-restart.log`）
+  2. `current` 向**更早移一条**（不修改快照链）
+  3. 对差集做**逆操作**（官方 CLI）：新增包 → 卸载；版本变化 → 卸载后重装基线版本；被卸载的包 → 装回（`pkg@spec`）
+  4. 重试，循环直到成功或**没有更早快照**（无限回滚，无次数上限）
+- **stderr 捕获**：第二代 stderr 经 pipe 写入**每次重试独立文件**（`dsh-graceful-restart-stderr-<时间戳>.log`），失败时读取本次完整输出（全量不截断），随错误记录移交第二代展示
 
 误判保护：Ctrl+C、显式关闭、显式重启都不触发回滚——只有**意外启动失败**才会。
 
@@ -52,7 +56,9 @@ restart_harness 的 continuePrompt 参数（智能体触发时指定）> setting
 ### 6. 设置菜单
 
 设置页新增 **"优雅重启"** 页签（`settings.section`）：
-- **快照保留版本数**（1–10，默认 3）——成功基线保留几个版本，回滚逐级回溯用
+- **快照时间线**：按时间列出快照链，`[当前]` 标记 current 指向的版本
+- **错误信息**（黑底终端风格）：最新一次启动失败（概要 + stderr 完整堆栈，可滚动、可复制）
+- **最近唤醒记录 / 最近回滚过程**：重启与回滚的完整过程
 
 ---
 
@@ -61,8 +67,9 @@ restart_harness 的 continuePrompt 参数（智能体触发时指定）> setting
 | 场景 | 行为 |
 |---|---|
 | 长任务进行中需要重启（升级配置、装插件） | 等轮次结束再退出，不打断当前回复；重启后自动唤醒继续 |
-| 装了一个会破坏启动的插件 | 第二代 boot 失败 → 守护自动卸载新增插件 → 重试 → 恢复服务（全程无人值守） |
-| 多个坏插件叠加、或回滚后仍失败 | 逐级回溯更早的成功基线，再多卸一批；达上限后停下并提示 |
+| 装了一个会破坏启动的插件 | 第二代 boot 失败 → 错误独立记录 → `current` 回退一条 → 差集逆操作卸载新增 → 重试 → 恢复服务（全程无人值守） |
+| 同时装了多个坏插件 / 卸载+安装组合出问题 | 逆操作完整处理：新增全部卸载、被卸载的装回、版本变化恢复基线版本 |
+| 回滚后仍失败 | 无限逐级回退更早快照，直到成功或没有更早快照（无次数上限） |
 | 重启/关闭安排错了 | `cancel_harness_action` 一键撤销，进程继续运行 |
 | 浏览器页面一直开着，DSH 关闭很久后重新打开 | 连接恢复 → 代际 ID 对比 → 自动刷新 |
 | 手动完整重启 / wrapper 重启 / 回滚换代 | 页面都自动刷新，无需手动 F5 |
@@ -86,7 +93,8 @@ restart_harness 的 continuePrompt 参数（智能体触发时指定）> setting
   → 第一代杀旧第二代 → 拉起新一代（同控制台 + WAKE=1）
   → 新一代服务 + 读 marker → 等会话恢复 → steer 唤醒
 失败回滚：新一代启动失败（非 0 退出/过快退出）
-  → 第一代对比清单基线 → dsh plugin remove 新增插件 → 重试（逐级回溯）
+  → 错误独立记录（errors）→ current 向更早移一条（不修改快照）
+  → 差集逆操作（新增卸载 / 被删装回 / 版本恢复）→ 重试（直到成功或无更早快照）
 关闭：IPC 通知第一代 → 杀子 → 整个树退出
 ```
 
@@ -113,11 +121,11 @@ dsh plugin --profile web add "file:D:/Project/dsh-graceful-restart"
 
 重启 DSH 生效（`file:` 依赖是复制快照——改代码后需 `remove` + `add` 重新同步）。
 
-### 设置（settings.yaml 或设置页"优雅重启"）
+### 设置（settings.yaml）
 
 ```yaml
 dsh-graceful-restart:
-  snapshotKeep: 3   # 成功基线保留版本数（1-10，默认 3）
+  continuePrompt: （系统已重启完成）请继续之前未完成的工作。   # 唤醒时默认继续提示
 ```
 
 ### 触发表
@@ -135,9 +143,26 @@ dsh-graceful-restart:
 ## 文件清单（$DSH_HOME 下）
 
 - `dsh-process.json` — pid/命令行索引
-- `dsh-graceful-restart-snapshot.json` — 启动守护快照（成功基线 history / current / rollbacks）
+- `dsh-graceful-restart-snapshot.json` — 启动守护快照（按时间排序的快照链 / current 时间戳指针 / errors 独立错误记录）
 - `dsh-resume.json` — 唤醒 marker（重启前写，唤醒完成后清除）
-- `dsh-graceful-restart.log` — 插件 + wrapper + 守护日志
+- `dsh-graceful-restart.log` — 插件 + wrapper + 守护日志（历史错误完整记录处）
+- `dsh-graceful-restart-stderr-<时间戳>.log` — 每次启动尝试的独立 stderr 捕获（失败时全量读取，成功后清理）
+
+---
+
+## 发行说明
+
+### v0.3.0（2026-08-16）
+
+**启动守护重构为纯指针模型**（快照链 + 唯一指针）：
+
+- **`current` = 时间戳键值**，指向按时间排序的快照链中当前生效版本；启动时扫描实际清单与 `current` 指向快照求差集——差集为空不变化，非空则先删除比 `current` 新的条目、再新建快照并移动指针
+- **错误独立记录**：启动失败不再记在快照条目上，而是独立 `errors` 数组（只保留最新一条；历史错误完整保留在日志文件）；视图错误区改为黑底终端风格（完整 stderr + 滚动条 + 复制按钮）
+- **无限逐级回滚**：移除 rollbackLimit 上限——失败时 `current` 向更早移一条（不修改快照链），对差集做**完整逆操作**（新增卸载 / 被删装回 / 版本变化恢复基线版本，`pkg@spec` 格式），循环直到成功或没有更早快照
+- **独立 stderr 文件**：每次启动尝试一个 `stderr-<时间戳>.log`，失败时全量读取（不截断、不累积多次失败内容），随错误记录移交第二代展示与唤醒
+- 修复：stdio[2] 误写 inherit 导致 `child.stderr` 为 null（spawn 后注册中断）；入列 dup 误判（全历史 vs HEAD）与键序敏感比较导致 `[当前]`/`⚠` 同行；快照链重复状态导致"无变化"条目与回滚白跳
+
+**升级**：`dsh plugin remove dsh-graceful-restart && dsh plugin add dsh-graceful-restart`，然后完整重启（`dsh web`）。旧格式快照自动迁移（条目内 error → errors 数组，current 对象 → 时间戳键值）。
 
 ---
 

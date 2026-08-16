@@ -1,7 +1,7 @@
 {
   "name": "dsh-graceful-restart",
-  "version": "0.2.0",
-  "description": "DSH（DeepSeek Harness）优雅重启/关闭/启动守护插件：启动方式不变（dsh web），自动套壳拉起正式实例；等轮次结束后优雅重启并唤醒智能体继续；启动失败自动回滚新增插件（多版本成功基线、官方 CLI）；页面自动刷新；设置菜单可调快照版本数。",
+  "version": "0.3.0",
+  "description": "DSH（DeepSeek Harness）优雅重启/关闭/启动守护插件：启动方式不变（dsh web），自动套壳拉起正式实例；等轮次结束后优雅重启并唤醒智能体继续；启动失败自动回滚（纯指针快照链、无限逐级回滚、双向差集逆操作、独立错误记录）；页面自动刷新。",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
