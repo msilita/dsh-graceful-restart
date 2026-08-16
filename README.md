@@ -152,6 +152,28 @@ dsh-graceful-restart:
 
 ## 发行说明
 
+### v0.4.0（2026-08-18）
+
+**两阶段统一故障判断**——修复"重启后会话未恢复却误判成功"的系统性问题：
+
+- **问题**：之前守护只判断"启动阶段"（退出码非 0 / 宽限期 20s 内退出）。刷新阶段
+  没有判断——第二代进程活着、退出码 0，不代表浏览器刷新后界面正常。会话恢复失败
+  （marker 会话未恢复为 live agent）时系统误判成功，界面被错误页阻挡却无人处理。
+- **刷新阶段自检（第二代做，IPC 上报第一代）**：
+  - 连接就绪：完全复刻浏览器判定——`POST /api/host.describe` 返回 ok +
+    `/api/events.mux`、`/api/events.host` 两条 downlink WebSocket 均能建立
+    （错误页 = 该判定失败，探测的就是错误页的底层条件）。
+  - 会话恢复（唤醒场景）：marker 目标会话恢复为 live agent 并成功 steer，
+    60s 超时未恢复 = 刷新阶段失败。
+  - 结果 `refresh-ok` / `refresh-failed` IPC 上报第一代；失败 → **统一故障链**
+    （与启动失败同一套：记 errors → current 回退 → 差集逆操作 → 重试）。
+- **成功判定升级**：`markSuccess` 需要 宽限期存活 AND refresh-ok 两个条件。
+- **唤醒闸门升级**：**刷新失败先不唤醒**——steer 以刷新自检通过为前提；
+  15s 兜底保留但同样以自检通过为前提。
+- **非唤醒启动同样受益**：普通启动也做连接就绪自检，失败同样回滚。
+
+**升级**：`dsh plugin remove dsh-graceful-restart && dsh plugin add dsh-graceful-restart`，然后完整重启（`dsh web`）。
+
 ### v0.3.0（2026-08-16）
 
 **启动守护重构为纯指针模型**（快照链 + 唯一指针）：
